@@ -1,8 +1,9 @@
 import pytest
-import tempfile
-import csv
+import os
 import json
+import csv
 from app.db_supabase import VectorDB
+from app.faiss_index import FAISSIndex
 
 # ----------------------
 # Fixture: fresh DB instance
@@ -11,15 +12,18 @@ from app.db_supabase import VectorDB
 def db():
     """
     Fresh DB instance for each test.
-    Clears both vectors and vectors_history.
+    Clears vectors and vectors_history before each test.
     """
-    db_instance = VectorDB()
+    db_instance = VectorDB(use_faiss=True)
     
     # Clear history first
     db_instance.history.supabase.table("vectors_history").delete().neq("version_id", 0).execute()
     
     # Then clear vectors
     db_instance.history.supabase.table("vectors").delete().neq("id", "").execute()
+    
+    # Rebuild FAISS index after clearing
+    db_instance._build_faiss_index()
     
     return db_instance
 
@@ -39,50 +43,12 @@ def test_batch_add(db):
     texts = ["AI is the future", "Python is versatile"]
     metas = [{"category": "tech"}, {"category": "programming"}]
     ids = db.batch_add(texts, metas)
+    
     results1 = db.search("AI")
     results2 = db.search("Python")
+    
     assert any(r["id"] == ids[0] for r in results1)
     assert any(r["id"] == ids[1] for r in results2)
-
-# ----------------------
-# Test batch CSV upload
-# ----------------------
-def test_batch_add_csv(db):
-    # Create temporary CSV file
-    with tempfile.NamedTemporaryFile(mode="w+", delete=False, newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["text", "category"])
-        writer.writeheader()
-        writer.writerow({"text": "Machine learning basics", "category": "tech"})
-        writer.writerow({"text": "Cooking recipes", "category": "food"})
-        csv_path = f.name
-
-    ids = db.batch_add_from_csv(csv_path, text_col="text", meta_cols=["category"])
-    results_tech = db.search("Machine", meta_filter={"category": "tech"})
-    results_food = db.search("Cooking", meta_filter={"category": "food"})
-
-    assert any(r["id"] == ids[0] for r in results_tech)
-    assert any(r["id"] == ids[1] for r in results_food)
-
-# ----------------------
-# Test batch JSON upload
-# ----------------------
-def test_batch_add_json(db):
-    data = [
-        {"text": "Deep learning tutorial", "category": "tech"},
-        {"text": "Travel blog", "category": "lifestyle"}
-    ]
-
-    # Create temporary JSON file
-    with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
-        json.dump(data, f)
-        json_path = f.name
-
-    ids = db.batch_add_from_json(json_path, text_key="text", meta_keys=["category"])
-    results_tech = db.search("Deep", meta_filter={"category": "tech"})
-    results_life = db.search("Travel", meta_filter={"category": "lifestyle"})
-
-    assert any(r["id"] == ids[0] for r in results_tech)
-    assert any(r["id"] == ids[1] for r in results_life)
 
 # ----------------------
 # Test search with metadata filter
@@ -90,6 +56,7 @@ def test_batch_add_json(db):
 def test_search_filter(db):
     db.add("Machine learning research", meta={"category": "tech"})
     results = db.search("ML", meta_filter={"category": "tech"})
+    
     assert len(results) > 0
     assert all(r["meta"]["category"] == "tech" for r in results)
 
@@ -115,6 +82,7 @@ def test_delete(db):
     entry_id = db.add("To be deleted", meta={"category": "temp"})
     deleted = db.delete(entry_id)
     assert deleted
+
     results = db.search("deleted")
     assert not any(r["id"] == entry_id for r in results)
 
@@ -131,3 +99,119 @@ def test_multiple_updates_history(db):
     texts = [h["text"] for h in history]
     assert "Initial" in texts
     assert "Second update" in texts
+
+# ----------------------
+# Test CSV batch insert
+# ----------------------
+def test_batch_add_csv(tmp_path, db):
+    csv_file = tmp_path / "test.csv"
+    fieldnames = ["text", "category"]
+    rows = [
+        {"text": "CSV entry 1", "category": "csv"},
+        {"text": "CSV entry 2", "category": "csv"}
+    ]
+    with open(csv_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    
+    ids = db.batch_add_from_csv(str(csv_file), text_col="text", meta_cols=["category"])
+    results = db.search("CSV")
+    
+    assert all(any(r["id"] == i for r in results) for i in ids)
+
+# ----------------------
+# Test JSON batch insert
+# ----------------------
+def test_batch_add_json(tmp_path, db):
+    json_file = tmp_path / "test.json"
+    data = [
+        {"text": "JSON entry 1", "category": "json"},
+        {"text": "JSON entry 2", "category": "json"}
+    ]
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    
+    ids = db.batch_add_from_json(str(json_file), text_key="text", meta_keys=["category"])
+    results = db.search("JSON")
+    
+    assert all(any(r["id"] == i for r in results) for i in ids)
+
+# ----------------------
+# Fixture: fresh DB + FAISS
+# ----------------------
+@pytest.fixture
+def db_and_faiss():
+    db = VectorDB()
+    
+    # Clear history first
+    db.history.supabase.table("vectors_history").delete().neq("version_id", 0).execute()
+    
+    # Clear main vectors
+    db.history.supabase.table("vectors").delete().neq("id", "").execute()
+    
+    # Add some initial vectors
+    texts = ["cat", "dog", "apple", "orange", "car", "bike"]
+    ids = db.batch_add(texts)
+    
+    # Build FAISS index
+    faiss_index = FAISSIndex(db)
+    
+    return db, faiss_index, ids
+
+# ----------------------
+# Test FAISS nearest neighbor search
+# ----------------------
+def test_faiss_search(db_and_faiss):
+    db, faiss_index, ids = db_and_faiss
+    
+    query_vec = db.model.encode("feline", normalize_embeddings=True)
+    results = faiss_index.search(query_vec, top_k=2)
+    
+    top_texts = [r["text"] for r in results]
+    assert "cat" in top_texts
+
+# ----------------------
+# Test FAISS index updates after adding new vector
+# ----------------------
+def test_faiss_after_add(db_and_faiss):
+    db, faiss_index, ids = db_and_faiss
+    
+    new_id = db.add("kitten")
+    faiss_index.build_index()
+    
+    query_vec = db.model.encode("feline", normalize_embeddings=True)
+    results = faiss_index.search(query_vec, top_k=2)
+    
+    top_texts = [r["text"] for r in results]
+    assert any(t in ["cat", "kitten"] for t in top_texts)
+
+# ----------------------
+# Test FAISS index updates after delete
+# ----------------------
+def test_faiss_after_delete(db_and_faiss):
+    db, faiss_index, ids = db_and_faiss
+    
+    db.delete(ids[0])
+    faiss_index.build_index()
+    
+    query_vec = db.model.encode("feline", normalize_embeddings=True)
+    results = faiss_index.search(query_vec, top_k=2)
+    
+    top_texts = [r["text"] for r in results]
+    assert "cat" not in top_texts
+
+# ----------------------
+# Test FAISS index update after modify
+# ----------------------
+def test_faiss_after_update(db_and_faiss):
+    db, faiss_index, ids = db_and_faiss
+    
+    db.update(ids[1], text="puppy")
+    faiss_index.build_index()
+    
+    query_vec = db.model.encode("puppy", normalize_embeddings=True)
+    results = faiss_index.search(query_vec, top_k=2)
+    
+    top_texts = [r["text"] for r in results]
+    assert "puppy" in top_texts

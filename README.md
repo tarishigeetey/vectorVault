@@ -16,7 +16,6 @@ VectorVault allows you to:
 - Prepare for **Approximate Nearest Neighbor (ANN)** search using FAISS or Annoy  
 
 **Ideal for:**  
-- Portfolio projects  
 - Learning backend ML systems  
 - Experimenting with vector databases and embeddings  
 

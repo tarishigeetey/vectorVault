@@ -1,0 +1,17 @@
+# Core libraries
+numpy>=1.26.0
+sentence-transformers>=2.2.2
+uuid
+
+# Supabase client
+supabase-py>=1.1.0
+
+# For environment variables
+python-dotenv>=1.0.0
+
+# Testing
+pytest>=8.4.2
+
+# Optional (for approximate nearest neighbor in future)
+faiss-cpu>=1.7.4
+annoy>=1.17.0

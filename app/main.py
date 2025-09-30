@@ -57,3 +57,21 @@ def save_db(path: str = "vector_db.pkl"):
 def load_db(path: str = "vector_db.pkl"):
     db.load(path)
     return {"message": f"Database loaded from {path}", "total_items": len(db.metadata)}
+
+@app.post("/upload/csv")
+async def upload_csv(file: UploadFile = File(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    
+    ids = db.batch_add_from_csv(tmp_path, text_col="text", meta_cols=["category", "author"])
+    return {"inserted_ids": ids}
+
+@app.post("/upload/json")
+async def upload_json(file: UploadFile = File(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    
+    ids = db.batch_add_from_json(tmp_path, text_key="text", meta_keys=["category", "author"])
+    return {"inserted_ids": ids}

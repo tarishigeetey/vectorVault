@@ -1,4 +1,7 @@
 import pytest
+import tempfile
+import csv
+import json
 from app.db_supabase import VectorDB
 
 # ----------------------
@@ -7,8 +10,8 @@ from app.db_supabase import VectorDB
 @pytest.fixture
 def db():
     """
-    Fresh DB instance for each test
-    Clears both vectors and vectors_history
+    Fresh DB instance for each test.
+    Clears both vectors and vectors_history.
     """
     db_instance = VectorDB()
     
@@ -42,6 +45,46 @@ def test_batch_add(db):
     assert any(r["id"] == ids[1] for r in results2)
 
 # ----------------------
+# Test batch CSV upload
+# ----------------------
+def test_batch_add_csv(db):
+    # Create temporary CSV file
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False, newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["text", "category"])
+        writer.writeheader()
+        writer.writerow({"text": "Machine learning basics", "category": "tech"})
+        writer.writerow({"text": "Cooking recipes", "category": "food"})
+        csv_path = f.name
+
+    ids = db.batch_add_from_csv(csv_path, text_col="text", meta_cols=["category"])
+    results_tech = db.search("Machine", meta_filter={"category": "tech"})
+    results_food = db.search("Cooking", meta_filter={"category": "food"})
+
+    assert any(r["id"] == ids[0] for r in results_tech)
+    assert any(r["id"] == ids[1] for r in results_food)
+
+# ----------------------
+# Test batch JSON upload
+# ----------------------
+def test_batch_add_json(db):
+    data = [
+        {"text": "Deep learning tutorial", "category": "tech"},
+        {"text": "Travel blog", "category": "lifestyle"}
+    ]
+
+    # Create temporary JSON file
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
+        json.dump(data, f)
+        json_path = f.name
+
+    ids = db.batch_add_from_json(json_path, text_key="text", meta_keys=["category"])
+    results_tech = db.search("Deep", meta_filter={"category": "tech"})
+    results_life = db.search("Travel", meta_filter={"category": "lifestyle"})
+
+    assert any(r["id"] == ids[0] for r in results_tech)
+    assert any(r["id"] == ids[1] for r in results_life)
+
+# ----------------------
 # Test search with metadata filter
 # ----------------------
 def test_search_filter(db):
@@ -58,11 +101,9 @@ def test_update(db):
     updated = db.update(entry_id, text="New text", meta={"category": "updated"})
     assert updated
 
-    # Check search returns updated text
     results = db.search("New")
     assert any(r["id"] == entry_id and r["text"] == "New text" for r in results)
 
-    # Check history exists
     history = db.history.get_history(entry_id)
     assert len(history) == 1
     assert history[0]["text"] == "Old text"
